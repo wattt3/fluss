@@ -336,6 +336,38 @@ class CoordinatorEventProcessorTest {
     }
 
     @Test
+    void testScheduledResumeDeletionResumesPendingDeletion() throws Exception {
+        initCoordinatorChannel();
+
+        // create a table
+        TablePath tablePath = TablePath.of(defaultDatabase, "resume_pending");
+        final long tableId =
+                createTable(
+                        tablePath,
+                        new TabletServerInfo[] {
+                            new TabletServerInfo(0, "rack0"),
+                            new TabletServerInfo(1, "rack1"),
+                            new TabletServerInfo(2, "rack2")
+                        });
+        retryVerifyContext(ctx -> assertThat(ctx.getTablePathById(tableId)).isNotNull());
+
+        // drop while the coordinator is down so the restart has a pending deletion to resume.
+        eventProcessor.shutdown();
+        metadataManager.dropTable(tablePath, false);
+
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.COORDINATOR_RESUME_DELETION_INTERVAL, Duration.ofMillis(100));
+        eventProcessor = buildCoordinatorEventProcessor(conf);
+        initCoordinatorChannel();
+        // eventProcessor.startup() boots its internal scheduler, which triggers ResumeDeletionEvent
+        eventProcessor.startup();
+
+        retry(
+                Duration.ofMinutes(1),
+                () -> assertThat(zookeeperClient.getTableAssignment(tableId)).isEmpty());
+    }
+
+    @Test
     void testServerBecomeOnlineAndOfflineLine() throws Exception {
         // make sure all request to gateway should be successful
         initCoordinatorChannel();
@@ -1169,6 +1201,10 @@ class CoordinatorEventProcessorTest {
     }
 
     private CoordinatorEventProcessor buildCoordinatorEventProcessor() {
+        return buildCoordinatorEventProcessor(new Configuration());
+    }
+
+    private CoordinatorEventProcessor buildCoordinatorEventProcessor(Configuration conf) {
         return new CoordinatorEventProcessor(
                 zookeeperClient,
                 serverMetadataCache,
@@ -1177,7 +1213,7 @@ class CoordinatorEventProcessorTest {
                 autoPartitionManager,
                 lakeTableTieringManager,
                 TestingMetricGroups.COORDINATOR_METRICS,
-                new Configuration(),
+                conf,
                 Executors.newFixedThreadPool(1, new ExecutorThreadFactory("test-coordinator-io")),
                 metadataManager,
                 kvSnapshotLeaseManager);

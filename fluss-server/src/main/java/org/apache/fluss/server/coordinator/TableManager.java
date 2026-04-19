@@ -70,8 +70,6 @@ public class TableManager {
         LOG.info("Start up table manager.");
         replicaStateMachine.startup();
         tableBucketStateMachine.startup();
-        // try to resume one deletion after start up
-        resumeDeletions();
     }
 
     public TableBucketStateMachine getTableBucketStateMachine() {

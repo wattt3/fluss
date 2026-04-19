@@ -29,7 +29,6 @@ import org.apache.fluss.server.coordinator.event.TestingEventManager;
 import org.apache.fluss.server.coordinator.statemachine.ReplicaStateMachine;
 import org.apache.fluss.server.coordinator.statemachine.TableBucketStateMachine;
 import org.apache.fluss.server.entity.DeleteReplicaResultForBucket;
-import org.apache.fluss.server.metadata.ServerInfo;
 import org.apache.fluss.server.zk.NOPErrorHandler;
 import org.apache.fluss.server.zk.ZkEpoch;
 import org.apache.fluss.server.zk.ZooKeeperClient;
@@ -215,54 +214,6 @@ class TableManagerTest {
                 () -> assertThat(zookeeperClient.getTableAssignment(tableId)).isEmpty());
         // the table will also be removed from coordinator context
         assertThat(coordinatorContext.getAllReplicasForTable(tableId)).isEmpty();
-    }
-
-    @Test
-    void testResumeDeletionAfterRestart() throws Exception {
-        // first, create a table
-        long tableId = zookeeperClient.getTableIdAndIncrement();
-        TableAssignment assignment = createAssignment();
-        zookeeperClient.registerTableAssignment(tableId, assignment);
-
-        coordinatorContext.putTableInfo(
-                TableInfo.of(
-                        DATA1_TABLE_PATH,
-                        tableId,
-                        0,
-                        DATA1_TABLE_DESCRIPTOR,
-                        DEFAULT_REMOTE_DATA_DIR,
-                        System.currentTimeMillis(),
-                        System.currentTimeMillis()));
-        tableManager.onCreateNewTable(DATA1_TABLE_PATH, tableId, assignment);
-
-        // now, delete the created table/partition
-        coordinatorContext.queueTableDeletion(Collections.singleton(tableId));
-        tableManager.onDeleteTable(tableId);
-
-        // shutdown table manager
-        tableManager.shutdown();
-
-        // restart table manager, it should resume table delete
-        // set coordinator context manually to make sure the followup delete can success
-        List<ServerInfo> serverInfos = CoordinatorTestUtils.createServers(Arrays.asList(0, 1, 2));
-        // set live tablet servers
-        coordinatorContext.setLiveTabletServers(serverInfos);
-        CoordinatorTestUtils.makeSendLeaderAndStopRequestAlwaysSuccess(
-                coordinatorContext, testCoordinatorChannelManager);
-
-        // update assignment to coordinator context
-        for (int bucketId : assignment.getBuckets()) {
-            TableBucket tableBucket = new TableBucket(tableId, bucketId);
-            List<Integer> replicas = assignment.getBucketAssignment(bucketId).getReplicas();
-            coordinatorContext.updateBucketReplicaAssignment(tableBucket, replicas);
-        }
-        // queue table deletion
-        coordinatorContext.queueTableDeletion(Collections.singleton(tableId));
-
-        // start table manager, should resume table deletion
-        tableManager.startup();
-
-        checkReplicaDelete(tableId, null, assignment);
     }
 
     @Test
