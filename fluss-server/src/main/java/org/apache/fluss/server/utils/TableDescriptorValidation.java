@@ -44,11 +44,13 @@ import org.apache.fluss.utils.StringUtils;
 
 import javax.annotation.Nullable;
 
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -477,6 +479,26 @@ public class TableDescriptorValidation {
                                     "Currently, auto partitioned table must set auto partition time unit when auto "
                                             + "partition is enabled, please set table property '%s'.",
                                     ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key()));
+                }
+
+                String timeFormat = autoPartition.timeFormat();
+                if (timeFormat != null) {
+                    if (timeFormat.trim().isEmpty()) {
+                        throw new InvalidConfigException(
+                                String.format(
+                                        "'%s' must not be empty.",
+                                        ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key()));
+                    }
+                    try {
+                        DateTimeFormatter.ofPattern(timeFormat, Locale.ROOT);
+                    } catch (IllegalArgumentException e) {
+                        throw new InvalidConfigException(
+                                String.format(
+                                        "Invalid time format '%s' for '%s': %s",
+                                        timeFormat,
+                                        ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
+                                        e.getMessage()));
+                    }
                 }
             }
         }

@@ -17,6 +17,12 @@
 
 package org.apache.fluss.server.coordinator;
 
+import static org.apache.fluss.server.utils.TableAssignmentUtils.generateAssignment;
+import static org.apache.fluss.utils.PartitionUtils.generateAutoPartition;
+import static org.apache.fluss.utils.PartitionUtils.generateAutoPartitionTime;
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
+import static org.apache.fluss.utils.concurrent.LockUtils.inLock;
+
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.cluster.TabletServerInfo;
 import org.apache.fluss.config.AutoPartitionTimeUnit;
@@ -37,12 +43,8 @@ import org.apache.fluss.utils.AutoPartitionStrategy;
 import org.apache.fluss.utils.clock.Clock;
 import org.apache.fluss.utils.clock.SystemClock;
 import org.apache.fluss.utils.concurrent.ExecutorThreadFactory;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -65,11 +67,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.apache.fluss.server.utils.TableAssignmentUtils.generateAssignment;
-import static org.apache.fluss.utils.PartitionUtils.generateAutoPartition;
-import static org.apache.fluss.utils.PartitionUtils.generateAutoPartitionTime;
-import static org.apache.fluss.utils.Preconditions.checkNotNull;
-import static org.apache.fluss.utils.concurrent.LockUtils.inLock;
+import javax.annotation.Nullable;
+import javax.annotation.concurrent.GuardedBy;
 
 /**
  * An auto partition manager which will trigger auto partition for the tables in cluster
@@ -419,11 +418,16 @@ public class AutoPartitionManager implements AutoCloseable {
                         currentInstant, autoPartitionStrategy.timeZone().toZoneId());
 
         int partitionToPreCreate = autoPartitionStrategy.numPreCreate();
+        String timeFormat = autoPartitionStrategy.timeFormat();
         List<ResolvedPartitionSpec> partitionsToCreate = new ArrayList<>();
         for (int idx = 0; idx < partitionToPreCreate; idx++) {
             ResolvedPartitionSpec partition =
                     generateAutoPartition(
-                            partitionKeys, currentZonedDateTime, idx, autoPartitionTimeUnit);
+                            partitionKeys,
+                            currentZonedDateTime,
+                            idx,
+                            autoPartitionTimeUnit,
+                            timeFormat);
             // if the partition already exists, we don't need to create it, otherwise, create it
             if (!currentPartitions.containsKey(partition.getPartitionName())) {
                 partitionsToCreate.add(partition);
@@ -451,7 +455,10 @@ public class AutoPartitionManager implements AutoCloseable {
         // Get the earliest one partition time that need to retain.
         String lastRetainPartitionTime =
                 generateAutoPartitionTime(
-                        currentZonedDateTime, -numToRetain, autoPartitionStrategy.timeUnit());
+                        currentZonedDateTime,
+                        -numToRetain,
+                        autoPartitionStrategy.timeUnit(),
+                        autoPartitionStrategy.timeFormat());
 
         // For partition table with a single partition key, for example dt(yyyyMMdd)
         // assuming now is 20250508, and table.auto-partition.num-retention=2 then partition
