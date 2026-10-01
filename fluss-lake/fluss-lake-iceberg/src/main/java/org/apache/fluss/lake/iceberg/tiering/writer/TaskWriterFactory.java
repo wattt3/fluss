@@ -19,6 +19,8 @@
 package org.apache.fluss.lake.iceberg.tiering.writer;
 
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.MetadataColumns;
+import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
@@ -34,6 +36,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.apache.iceberg.TableProperties.METRICS_MODE_COLUMN_CONF_PREFIX;
 import static org.apache.iceberg.TableProperties.WRITE_TARGET_FILE_SIZE_BYTES;
 import static org.apache.iceberg.TableProperties.WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT;
 
@@ -72,9 +75,15 @@ public class TaskWriterFactory {
                     bucket);
 
         } else {
+            // keep the full bounds of the referenced data file path in the position delete files
+            // instead of the truncated bounds, so that the position delete files can be
+            // recognized as file-scoped deletes
             FileAppenderFactory<Record> appenderFactory =
-                    new GenericAppenderFactory(
-                            schema, table.spec(), equalityFieldIds, schema, null);
+                    new GenericAppenderFactory(schema, table.spec(), equalityFieldIds, schema, null)
+                            .set(
+                                    METRICS_MODE_COLUMN_CONF_PREFIX
+                                            + MetadataColumns.DELETE_FILE_PATH.name(),
+                                    MetricsModes.Full.get().toString());
             List<String> columns = new ArrayList<>();
             for (Integer fieldId : schema.identifierFieldIds()) {
                 columns.add(schema.findField(fieldId).name());

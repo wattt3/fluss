@@ -51,6 +51,7 @@ import java.util.stream.Collectors;
 
 import static org.apache.fluss.lake.iceberg.utils.IcebergConversions.toIceberg;
 import static org.apache.fluss.lake.writer.LakeTieringFactory.FLUSS_LAKE_TIERING_COMMIT_USER;
+import static org.apache.fluss.utils.Preconditions.checkState;
 
 /** Implementation of {@link LakeCommitter} for Iceberg. */
 public class IcebergLakeCommitter implements LakeCommitter<IcebergWriteResult, IcebergCommittable> {
@@ -164,7 +165,19 @@ public class IcebergLakeCommitter implements LakeCommitter<IcebergWriteResult, I
                 throw new IllegalArgumentException(
                         "Rewrite data file results must have same snapshot id.");
             }
-            rewriteFiles.validateFromSnapshot(rewriteDataFileResults.get(0).snapshotId());
+            long startingSnapshotId = rewriteDataFileResults.get(0).snapshotId();
+            Snapshot startingSnapshot = icebergTable.snapshot(startingSnapshotId);
+            checkState(
+                    startingSnapshot != null,
+                    "The snapshot %s that the rewrite is planned on doesn't exist.",
+                    startingSnapshotId);
+            rewriteFiles.validateFromSnapshot(startingSnapshotId);
+            // The written files are committed before the rewrite, for primary key table, they
+            // contain equality deletes applying to the data files to be replaced. Keep the
+            // rewritten data files at the sequence number of the snapshot that the rewrite is
+            // planned on, so that these equality deletes still apply to the rewritten data files
+            // and won't be considered as conflicts while validating the rewrite.
+            rewriteFiles.dataSequenceNumber(startingSnapshot.sequenceNumber());
             for (RewriteDataFileResult rewriteDataFileResult : rewriteDataFileResults) {
                 rewriteDataFileResult.addedDataFiles().forEach(rewriteFiles::addFile);
                 rewriteDataFileResult.deletedDataFiles().forEach(rewriteFiles::deleteFile);

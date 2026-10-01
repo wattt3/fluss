@@ -24,6 +24,7 @@ import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.InternalRecordWrapper;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.io.BaseTaskWriter;
 import org.apache.iceberg.io.FileAppenderFactory;
 import org.apache.iceberg.io.FileIO;
@@ -77,7 +78,10 @@ class GenericRecordDeltaWriter extends BaseTaskWriter<Record> {
 
         private GenericEqualityDeltaWriter(
                 PartitionKey partition, Schema schema, Schema eqDeleteSchema) {
-            super(partition, schema, eqDeleteSchema);
+            // The position deletes only delete the rows written by this writer. Write
+            // file-scoped position deletes so that they won't be considered to apply to other
+            // data files in the same partition, which would conflict with rewriting these files.
+            super(partition, schema, eqDeleteSchema, DeleteGranularity.FILE);
             this.wrapper = new InternalRecordWrapper(schema.asStruct());
             this.keyWrapper = new InternalRecordWrapper(eqDeleteSchema.asStruct());
         }

@@ -41,6 +41,8 @@ import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.types.Tuple2;
 
+import org.apache.iceberg.DataOperations;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
@@ -50,6 +52,7 @@ import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
@@ -366,6 +369,65 @@ class IcebergTieringTest {
     }
 
     @Test
+    void testPrimaryKeyTableCompaction() throws Exception {
+        TablePath tablePath = TablePath.of("iceberg", "test_pk_table_compaction");
+        createTable(tablePath, true, false);
+        TableInfo tableInfo = createTableInfo(tablePath, true, false, true);
+        Table icebergTable = icebergCatalog.loadTable(toIceberg(tablePath));
+        int bucket = 0;
+
+        // tier three rounds, each round produces one small data file in the bucket
+        long offset = 0;
+        for (int key = 0; key < 3; key++) {
+            GenericRow row = genKvRow(null, bucket, key, key, key + 1).get(0);
+            tierRecords(
+                    tablePath,
+                    tableInfo,
+                    bucket,
+                    Collections.singletonList(toRecord(offset++, row, INSERT)));
+        }
+        icebergTable.refresh();
+        assertThat(countDataFiles(icebergTable)).isEqualTo(3);
+
+        // the fourth round compacts the three small data files, and also writes equality
+        // deletes which are applied to the data files being compacted
+        List<LogRecord> records =
+                Arrays.asList(
+                        // update key 0 written by previous round, produces an equality delete
+                        toRecord(offset++, genKvRow(null, bucket, 0, 0, 1).get(0), UPDATE_BEFORE),
+                        toRecord(offset++, genKvRow(null, bucket, 0, 10, 11).get(0), UPDATE_AFTER),
+                        // delete key 1 written by previous round, produces an equality delete
+                        toRecord(offset++, genKvRow(null, bucket, 1, 1, 2).get(0), DELETE),
+                        // insert and update key 3 in this round, produces a position delete
+                        toRecord(offset++, genKvRow(null, bucket, 3, 11, 12).get(0), INSERT),
+                        toRecord(offset++, genKvRow(null, bucket, 3, 11, 12).get(0), UPDATE_BEFORE),
+                        toRecord(offset, genKvRow(null, bucket, 3, 12, 13).get(0), UPDATE_AFTER));
+        long snapshotId = tierRecords(tablePath, tableInfo, bucket, records);
+
+        // the rewrite should be committed on top of the written files
+        icebergTable.refresh();
+        Snapshot icebergSnapshot = icebergTable.currentSnapshot();
+        assertThat(icebergSnapshot.snapshotId()).isEqualTo(snapshotId);
+        assertThat(icebergSnapshot.operation()).isEqualTo(DataOperations.REPLACE);
+        assertThat(icebergSnapshot.summary()).containsEntry("k1", "v1");
+        // one compacted data file, and one data file written by the fourth round
+        assertThat(countDataFiles(icebergTable)).isEqualTo(2);
+
+        // the deletes written by the fourth round must still be applied to the compacted file
+        Map<Integer, String> actualRows = new HashMap<>();
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(icebergTable).build()) {
+            for (Record row : rows) {
+                assertThat(actualRows.put((Integer) row.get(0), row.get(1, String.class))).isNull();
+            }
+        }
+        Map<Integer, String> expectedRows = new HashMap<>();
+        expectedRows.put(0, "bucket0_10");
+        expectedRows.put(2, "bucket0_2");
+        expectedRows.put(3, "bucket0_12");
+        assertThat(actualRows).isEqualTo(expectedRows);
+    }
+
+    @Test
     void testRejectIncompatiblePartitionSpec() {
         TablePath tablePath = TablePath.of("iceberg", "test_incompatible_partition_spec");
         createTable(tablePath, true, false);
@@ -390,8 +452,48 @@ class IcebergTieringTest {
                 .hasMessageContaining("Iceberg partition spec is incompatible");
     }
 
+    private long tierRecords(
+            TablePath tablePath, TableInfo tableInfo, int bucket, List<LogRecord> records)
+            throws Exception {
+        IcebergWriteResult writeResult;
+        try (LakeWriter<IcebergWriteResult> writer =
+                createLakeWriter(tablePath, bucket, null, null, tableInfo)) {
+            for (LogRecord record : records) {
+                writer.write(record);
+            }
+            writeResult = writer.complete();
+        }
+
+        try (LakeCommitter<IcebergWriteResult, IcebergCommittable> lakeCommitter =
+                createLakeCommitter(tablePath, tableInfo)) {
+            IcebergCommittable committable =
+                    lakeCommitter.toCommittable(Collections.singletonList(writeResult));
+            return lakeCommitter
+                    .commit(committable, Collections.singletonMap("k1", "v1"))
+                    .getCommittedSnapshotId();
+        }
+    }
+
+    private int countDataFiles(Table table) throws IOException {
+        int count = 0;
+        try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+            for (FileScanTask ignored : tasks) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private TableInfo createTableInfo(
             TablePath tablePath, boolean isPrimaryKeyTable, boolean isPartitionedTable) {
+        return createTableInfo(tablePath, isPrimaryKeyTable, isPartitionedTable, false);
+    }
+
+    private TableInfo createTableInfo(
+            TablePath tablePath,
+            boolean isPrimaryKeyTable,
+            boolean isPartitionedTable,
+            boolean autoCompaction) {
         Schema.Builder schemaBuilder =
                 Schema.newBuilder()
                         .column("c1", DataTypes.INT())
@@ -409,7 +511,8 @@ class IcebergTieringTest {
                 TableDescriptor.builder()
                         .schema(schemaBuilder.build())
                         .distributedBy(BUCKET_NUM)
-                        .property(ConfigOptions.TABLE_DATALAKE_ENABLED, true);
+                        .property(ConfigOptions.TABLE_DATALAKE_ENABLED, true)
+                        .property(ConfigOptions.TABLE_DATALAKE_AUTO_COMPACTION, autoCompaction);
         if (isPartitionedTable) {
             descriptorBuilder.partitionedBy("c3");
         }
